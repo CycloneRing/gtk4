@@ -23,7 +23,7 @@
 #include <float.h>
 #include <gdk/gdk.h>
 
-#import "GdkMacosCairoView.h"
+#import "GdkMacosView.h"
 
 #include "gdkmacossurface-private.h"
 
@@ -61,6 +61,14 @@ window_is_fullscreen (GdkMacosSurface *self)
   g_assert (GDK_IS_MACOS_SURFACE (self));
 
   return ([self->window styleMask] & NSWindowStyleMaskFullScreen) != 0;
+}
+
+static void
+gdk_macos_surface_update_buffers (GdkMacosSurface *self)
+{
+  g_assert (GDK_IS_MACOS_SURFACE (self));
+
+  g_clear_object (&self->buffer);
 }
 
 void
@@ -111,9 +119,8 @@ gdk_macos_surface_set_opaque_region (GdkSurface     *surface,
       self->opaque_region = cairo_region_copy (region);
     }
 
-  if ((nsview = _gdk_macos_surface_get_view (GDK_MACOS_SURFACE (surface))) &&
-      GDK_IS_MACOS_CAIRO_VIEW (nsview))
-    [(GdkMacosCairoView *)nsview setOpaqueRegion:region];
+  if ((nsview = _gdk_macos_surface_get_view (GDK_MACOS_SURFACE (surface))))
+    [(GdkMacosView *)nsview setOpaqueRegion:region];
 }
 
 static void
@@ -125,6 +132,8 @@ gdk_macos_surface_hide (GdkSurface *surface)
 
   g_assert (GDK_IS_MACOS_SURFACE (self));
 
+  self->show_on_next_swap = FALSE;
+
   _gdk_macos_display_remove_frame_callback (GDK_MACOS_DISPLAY (surface->display), self);
 
   was_mapped = GDK_SURFACE_IS_MAPPED (GDK_SURFACE (self));
@@ -135,6 +144,8 @@ gdk_macos_surface_hide (GdkSurface *surface)
   [self->window hide];
 
   _gdk_surface_clear_update_area (surface);
+
+  gdk_macos_surface_update_buffers (self);
 
   if (was_mapped)
     gdk_surface_freeze_updates (GDK_SURFACE (self));
@@ -592,6 +603,27 @@ _gdk_macos_surface_get_shadow (GdkMacosSurface *self,
     *right = self->shadow_right;
 }
 
+gboolean
+_gdk_macos_surface_is_opaque (GdkMacosSurface *self)
+{
+  g_return_val_if_fail (GDK_IS_MACOS_SURFACE (self), FALSE);
+
+  if (self->opaque_region != NULL &&
+      cairo_region_num_rectangles (self->opaque_region) == 1)
+    {
+      cairo_rectangle_int_t extents;
+
+      cairo_region_get_extents (self->opaque_region, &extents);
+
+      return (extents.x == 0 &&
+              extents.y == 0 &&
+              extents.width == GDK_SURFACE (self)->width &&
+              extents.height == GDK_SURFACE (self)->height);
+    }
+
+  return FALSE;
+}
+
 const char *
 _gdk_macos_surface_get_title (GdkMacosSurface *self)
 {
@@ -674,6 +706,29 @@ _gdk_macos_surface_resize (GdkMacosSurface *self,
   g_return_if_fail (GDK_IS_MACOS_SURFACE (self));
 
   _gdk_macos_surface_move_resize (self, -1, -1, width, height);
+}
+
+void
+_gdk_macos_surface_set_next_frame (GdkMacosSurface *self,
+                                   NSRect           next_frame)
+{
+  GdkDisplay *display;
+
+  g_return_if_fail (GDK_IS_MACOS_SURFACE (self));
+
+  display = gdk_surface_get_display (GDK_SURFACE (self));
+
+  _gdk_macos_display_from_display_coords (GDK_MACOS_DISPLAY (display),
+                                          next_frame.origin.x,
+                                          next_frame.origin.y + next_frame.size.height,
+                                          &self->next_frame.x, &self->next_frame.y);
+  self->next_frame.width = next_frame.size.width;
+  self->next_frame.height = next_frame.size.height;
+
+  self->next_frame_set = TRUE;
+  self->geometry_dirty = TRUE;
+
+  gdk_surface_request_layout (GDK_SURFACE (self));
 }
 
 void
@@ -775,7 +830,7 @@ _gdk_macos_surface_show (GdkMacosSurface *self)
 
   _gdk_macos_display_clear_sorting (GDK_MACOS_DISPLAY (GDK_SURFACE (self)->display));
 
-  [self->window showAndMakeKey:YES];
+  self->show_on_next_swap = TRUE;
 
   if (!was_mapped)
     {
@@ -786,51 +841,6 @@ _gdk_macos_surface_show (GdkMacosSurface *self)
           gdk_surface_thaw_updates (GDK_SURFACE (self));
         }
     }
-
-  [[self->window contentView] setNeedsDisplay:YES];
-}
-
-CGContextRef
-_gdk_macos_surface_acquire_context (GdkMacosSurface *self,
-                                    gboolean         clear_scale,
-                                    gboolean         antialias)
-{
-  CGContextRef cg_context;
-
-  g_return_val_if_fail (GDK_IS_MACOS_SURFACE (self), NULL);
-
-  if (GDK_SURFACE_DESTROYED (self))
-    return NULL;
-
-  if (!(cg_context = [[NSGraphicsContext currentContext] CGContext]))
-    return NULL;
-
-  CGContextSaveGState (cg_context);
-
-  if (!antialias)
-    CGContextSetAllowsAntialiasing (cg_context, antialias);
-
-  if (clear_scale)
-    {
-      CGSize scale;
-
-      scale = CGSizeMake (1.0, 1.0);
-      scale = CGContextConvertSizeToDeviceSpace (cg_context, scale);
-
-      CGContextScaleCTM (cg_context, 1.0 / fabs (scale.width), 1.0 / fabs (scale.height));
-    }
-
-  return cg_context;
-}
-
-void
-_gdk_macos_surface_release_context (GdkMacosSurface *self,
-                                    CGContextRef     cg_context)
-{
-  g_return_if_fail (GDK_IS_MACOS_SURFACE (self));
-
-  CGContextRestoreGState (cg_context);
-  CGContextSetAllowsAntialiasing (cg_context, TRUE);
 }
 
 void
@@ -924,10 +934,13 @@ _gdk_macos_surface_move_resize (GdkMacosSurface *self,
 
   content_rect = NSMakeRect (x, y, width, height);
   frame_rect = [self->window frameRectForContentRect:content_rect];
-  [self->window setFrame:frame_rect display:YES];
+  [self->window setFrame:frame_rect display:NO];
 
   if (size_changed)
-    gdk_surface_invalidate_rect (surface, NULL);
+    {
+      gdk_macos_surface_update_buffers (self);
+      gdk_surface_invalidate_rect (surface, NULL);
+    }
 }
 
 gboolean
@@ -995,7 +1008,7 @@ _gdk_macos_surface_monitor_changed (GdkMacosSurface *self)
       g_object_unref (monitor);
     }
 
-  _gdk_surface_update_size (GDK_SURFACE (self));
+  _gdk_macos_surface_update_size (self);
   gdk_surface_invalidate_rect (GDK_SURFACE (self), NULL);
 }
 
@@ -1076,4 +1089,70 @@ _gdk_macos_surface_get_root_coords (GdkMacosSurface *self,
 
   if (y)
     *y = out_y;
+}
+
+void
+_gdk_macos_surface_update_size (GdkMacosSurface *self)
+{
+  g_return_if_fail (GDK_IS_MACOS_SURFACE (self));
+
+  _gdk_surface_update_size (GDK_SURFACE (self));
+  gdk_macos_surface_update_buffers (self);
+}
+
+GdkMacosBuffer *
+_gdk_macos_surface_get_buffer (GdkMacosSurface *self)
+{
+  g_return_val_if_fail (GDK_IS_MACOS_SURFACE (self), NULL);
+
+  if (GDK_SURFACE_DESTROYED (self))
+    return NULL;
+
+  if (self->buffer == NULL)
+    {
+      /* Create replacement buffer. We always use 4-byte and 32-bit BGRA for
+       * our surface as that can work with both Cairo and GL. The GdkMacosTile
+       * handles opaque regions for the compositor, so using 3-byte/24-bit is
+       * not a necessary optimization.
+       */
+      double scale = gdk_surface_get_scale_factor (GDK_SURFACE (self));
+      guint width = GDK_SURFACE (self)->width * scale;
+      guint height = GDK_SURFACE (self)->height * scale;
+
+      self->buffer = _gdk_macos_buffer_new (width, height, scale, 4, 32);
+    }
+
+  return self->buffer;
+}
+
+static void
+_gdk_macos_surface_do_delayed_show (GdkMacosSurface *self)
+{
+  g_assert (GDK_IS_MACOS_SURFACE (self));
+
+  self->show_on_next_swap = FALSE;
+  [self->window showAndMakeKey:YES];
+  gdk_surface_request_motion (GDK_SURFACE (self));
+}
+
+void
+_gdk_macos_surface_swap_buffers (GdkMacosSurface      *self,
+                                 const cairo_region_t *damage)
+{
+  g_return_if_fail (GDK_IS_MACOS_SURFACE (self));
+  g_return_if_fail (damage != NULL);
+
+  /* This code looks like it swaps buffers, but since the IOSurfaceRef
+   * appears to be retained on the other side, we really just ask all
+   * of the GdkMacosTile CALayer's to update their contents.
+   */
+  [self->window swapBuffer:self->buffer withDamage:damage];
+
+  /* We might have delayed actually showing the window until the buffer
+   * contents are ready to be displayed. Doing so ensures that we don't
+   * get a point where we might have invalid buffer contents before we
+   * have content to display to the user.
+   */
+  if G_UNLIKELY (self->show_on_next_swap)
+    _gdk_macos_surface_do_delayed_show (self);
 }

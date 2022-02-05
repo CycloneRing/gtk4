@@ -24,8 +24,7 @@
 #include <gdk/gdk.h>
 
 #import "GdkMacosBaseView.h"
-#import "GdkMacosCairoView.h"
-#import "GdkMacosGLView.h"
+#import "GdkMacosView.h"
 #import "GdkMacosWindow.h"
 
 #include "gdkmacosclipboard-private.h"
@@ -150,8 +149,7 @@ typedef NSString *CALayerContentsGravity;
       _gdk_macos_display_break_all_grabs (GDK_MACOS_DISPLAY (display), time);
 
       /* Reset gravity */
-      if (GDK_IS_MACOS_GL_VIEW ([self contentView]))
-        [[[self contentView] layer] setContentsGravity:kCAGravityBottomLeft];
+      [[[self contentView] layer] setContentsGravity:kCAGravityBottomLeft];
 
       break;
     }
@@ -231,7 +229,24 @@ typedef NSString *CALayerContentsGravity;
 
   /* In case the window is changed when maximized remove the maximized state */
   if (maximized && !inMaximizeTransition && !NSEqualRects (lastMaximizedFrame, [self frame]))
-    [self windowDidUnmaximize];
+    {
+      NSRect last = lastUnmaximizedFrame;
+      NSRect newFrame = [self frame];
+
+      [self windowDidUnmaximize];
+
+      /* If we had a previous position, try to give the user something
+       * that resembles they grabbed it even though our warp could have
+       * made it a bit of a jump.
+       */
+      if (!CGRectIsNull (last))
+        {
+          newFrame.size = last.size;
+          newFrame.origin = [self mouseLocationOutsideOfEventStream];
+          newFrame.origin.x -= last.size.width / 2;
+          [self setFrame:newFrame display:NO];
+        }
+    }
 
   _gdk_macos_surface_update_position (gdk_surface);
   _gdk_macos_surface_reposition_children (gdk_surface);
@@ -266,7 +281,7 @@ typedef NSString *CALayerContentsGravity;
 
   [[self contentView] setFrame:NSMakeRect (0, 0, surface->width, surface->height)];
 
-  _gdk_surface_update_size (surface);
+  _gdk_macos_surface_update_size (gdk_surface);
 
   gdk_surface_request_layout (surface);
 
@@ -281,7 +296,7 @@ typedef NSString *CALayerContentsGravity;
                    defer:(BOOL)flag
                   screen:(NSScreen *)screen
 {
-  GdkMacosCairoView *view;
+  GdkMacosView *view;
 
   self = [super initWithContentRect:contentRect
 	                        styleMask:styleMask
@@ -292,8 +307,9 @@ typedef NSString *CALayerContentsGravity;
   [self setAcceptsMouseMovedEvents:YES];
   [self setDelegate:(id<NSWindowDelegate>)self];
   [self setReleasedWhenClosed:YES];
+  [self setPreservesContentDuringLiveResize:NO];
 
-  view = [[GdkMacosCairoView alloc] initWithFrame:contentRect];
+  view = [[GdkMacosView alloc] initWithFrame:contentRect];
   [self setContentView:view];
   [view release];
 
@@ -544,15 +560,12 @@ typedef NSString *CALayerContentsGravity;
       new_frame.size.height = min_size.height;
     }
 
-  /* We could also apply aspect ratio:
-     new_frame.size.height = new_frame.size.width / [self aspectRatio].width * [self aspectRatio].height;
-  */
-
-  [self setFrame:new_frame display:YES];
-
-  /* Let the resizing be handled by GTK. */
-  if (g_main_context_pending (NULL))
-    g_main_context_iteration (NULL, FALSE);
+  /* We don't want to change the window size until we get to our
+   * next layout operation so that things are more likely to stay
+   * synchronized with contents vs frame.
+   */
+  _gdk_macos_surface_set_next_frame ([self gdkSurface], new_frame);
+  gdk_surface_request_layout (GDK_SURFACE ([self gdkSurface]));
 
   inTrackManualResize = NO;
 
@@ -561,48 +574,46 @@ typedef NSString *CALayerContentsGravity;
 
 -(void)beginManualResize:(GdkSurfaceEdge)edge
 {
+  CALayerContentsGravity gravity = kCAGravityBottomLeft;
+
   if (inMove || inManualMove || inManualResize)
     return;
 
   inManualResize = YES;
   resizeEdge = edge;
 
-  if (GDK_IS_MACOS_GL_VIEW ([self contentView]))
+
+  switch (edge)
     {
-      CALayerContentsGravity gravity = kCAGravityBottomLeft;
+    default:
+    case GDK_SURFACE_EDGE_NORTH:
+      gravity = kCAGravityTopLeft;
+      break;
 
-      switch (edge)
-        {
-        default:
-        case GDK_SURFACE_EDGE_NORTH:
-          gravity = kCAGravityTopLeft;
-          break;
+    case GDK_SURFACE_EDGE_NORTH_WEST:
+      gravity = kCAGravityTopRight;
+      break;
 
-        case GDK_SURFACE_EDGE_NORTH_WEST:
-          gravity = kCAGravityTopRight;
-          break;
+    case GDK_SURFACE_EDGE_SOUTH_WEST:
+    case GDK_SURFACE_EDGE_WEST:
+      gravity = kCAGravityBottomRight;
+      break;
 
-        case GDK_SURFACE_EDGE_SOUTH_WEST:
-        case GDK_SURFACE_EDGE_WEST:
-          gravity = kCAGravityBottomRight;
-          break;
+    case GDK_SURFACE_EDGE_SOUTH:
+    case GDK_SURFACE_EDGE_SOUTH_EAST:
+      gravity = kCAGravityBottomLeft;
+      break;
 
-        case GDK_SURFACE_EDGE_SOUTH:
-        case GDK_SURFACE_EDGE_SOUTH_EAST:
-          gravity = kCAGravityBottomLeft;
-          break;
+    case GDK_SURFACE_EDGE_EAST:
+      gravity = kCAGravityBottomLeft;
+      break;
 
-        case GDK_SURFACE_EDGE_EAST:
-          gravity = kCAGravityBottomLeft;
-          break;
-
-        case GDK_SURFACE_EDGE_NORTH_EAST:
-          gravity = kCAGravityTopLeft;
-          break;
-        }
-
-      [[[self contentView] layer] setContentsGravity:gravity];
+    case GDK_SURFACE_EDGE_NORTH_EAST:
+      gravity = kCAGravityTopLeft;
+      break;
     }
+
+  [[[self contentView] layer] setContentsGravity:gravity];
 
   initialResizeFrame = [self frame];
   initialResizeLocation = convert_nspoint_to_screen (self, [self mouseLocationOutsideOfEventStream]);
@@ -806,7 +817,7 @@ typedef NSString *CALayerContentsGravity;
 
 -(void)windowWillExitFullScreen:(NSNotification *)aNotification
 {
-  [self setFrame:lastUnfullscreenFrame display:YES];
+  [self setFrame:lastUnfullscreenFrame display:NO];
 }
 
 -(void)windowDidExitFullScreen:(NSNotification *)aNotification
@@ -850,6 +861,11 @@ typedef NSString *CALayerContentsGravity;
 -(BOOL)movableByWindowBackground
 {
   return NO;
+}
+
+-(void)swapBuffer:(GdkMacosBuffer *)buffer withDamage:(const cairo_region_t *)damage
+{
+  [(GdkMacosView *)[self contentView] swapBuffer:buffer withDamage:damage];
 }
 
 @end

@@ -419,8 +419,16 @@ _gdk_macos_toplevel_surface_compute_size (GdkSurface *surface)
   g_warn_if_fail (size.width > 0);
   g_warn_if_fail (size.height > 0);
 
-  width = surface->width;
-  height = surface->height;
+  if (GDK_MACOS_SURFACE (self)->next_frame_set)
+    {
+      width = GDK_MACOS_SURFACE (self)->next_frame.width;
+      height = GDK_MACOS_SURFACE (self)->next_frame.height;
+    }
+  else
+    {
+      width = surface->width;
+      height = surface->height;
+    }
 
   if (self->layout != NULL &&
       gdk_toplevel_layout_get_resizable (self->layout))
@@ -446,7 +454,16 @@ _gdk_macos_toplevel_surface_compute_size (GdkSurface *surface)
   gdk_surface_constrain_size (&geometry, mask, width, height, &width, &height);
 
   _gdk_macos_surface_set_geometry_hints (GDK_MACOS_SURFACE (self), &geometry, mask);
-  _gdk_macos_surface_resize (GDK_MACOS_SURFACE (self), width, height);
+
+  if (GDK_MACOS_SURFACE (self)->next_frame_set)
+    _gdk_macos_surface_move_resize (GDK_MACOS_SURFACE (self),
+                                    GDK_MACOS_SURFACE (self)->next_frame.x,
+                                    GDK_MACOS_SURFACE (self)->next_frame.y,
+                                    width, height);
+  else
+    _gdk_macos_surface_resize (GDK_MACOS_SURFACE (self), width, height);
+
+  GDK_MACOS_SURFACE (self)->next_frame_set = FALSE;
 
   return FALSE;
 }
