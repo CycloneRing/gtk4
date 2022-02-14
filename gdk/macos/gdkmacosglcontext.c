@@ -243,8 +243,12 @@ gdk_macos_gl_context_allocate (GdkMacosGLContext *self)
 
   /* Alter to an opaque surface if necessary */
   opaque = _gdk_macos_surface_is_opaque (GDK_MACOS_SURFACE (surface));
-  if (!CHECK (NULL, CGLSetParameter (self->cgl_context, kCGLCPSurfaceOpacity, &opaque)))
-    return;
+  if (opaque != self->last_opaque)
+    {
+      self->last_opaque = !!opaque;
+      if (!CHECK (NULL, CGLSetParameter (self->cgl_context, kCGLCPSurfaceOpacity, &opaque)))
+        return;
+    }
 
   if (self->texture == 0)
     {

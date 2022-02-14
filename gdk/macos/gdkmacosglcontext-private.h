@@ -47,6 +47,8 @@ struct _GdkMacosGLContext
   GLuint texture;
   GLuint target;
   GLuint fbo;
+
+  guint last_opaque : 1;
 };
 
 struct _GdkMacosGLContextClass
